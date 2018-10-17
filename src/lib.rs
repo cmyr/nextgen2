@@ -5,10 +5,13 @@ extern crate crossbeam;
 
 pub mod mio_chan;
 
-use std::io::{self, ErrorKind, Read, Write};
+use std::io::{self, BufRead, BufReader, ErrorKind, Read, Write};
 use std::fs::{self, OpenOptions, File};
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
+
+use pipe::FileFIFOExt;
+use std::thread;
 
 pub struct ReadPipe {
     path: PathBuf,
@@ -121,4 +124,41 @@ impl LazyWritePipe {
             .write_all(msg.as_ref())
     }
 }
+
+pub fn spin_read<R: Read>(reader: &mut R) -> io::Result<Vec<u8>> {
+    let mut buf = Vec::new();
+    let mut reader = BufReader::new(reader);
+    loop {
+        match reader.read_until(b'\n', &mut buf) {
+            Err(ref e) if e.kind() == ErrorKind::WouldBlock => thread::yield_now(),
+            Err(e) => return Err(e),
+            Ok(0) => return Err(io::Error::new(ErrorKind::UnexpectedEof, "hmm")),
+            Ok(_) => break,
+        }
+    }
+    buf.pop();
+    Ok(buf)
+}
+
+pub fn spin_open_write_pipe<P: AsRef<Path>>(path: P) -> io::Result<File> {
+    let path = path.as_ref();
+    loop {
+        match pipe::open_write(path) {
+            Err(ref e) if e.kind() == ErrorKind::NotFound
+                ||  e.raw_os_error() == Some(6) => thread::yield_now(),
+            other => break other,
+        }
+    }
+}
+
+pub fn make_read_pipe<P: AsRef<Path>>(path: P) -> io::Result<File> {
+    let path = path.as_ref();
+    if !path.exists() {
+        pipe::create(&path, None)?;
+    }
+    let file = pipe::open_read(&path)?;
+    assert!(file.is_fifo().expect("is_fifo read failed"), "{:?} is not a fifo pipe", &path);
+    Ok(file)
+}
+
 

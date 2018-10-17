@@ -28,9 +28,8 @@ const SERVER: Token = Token(1);
 fn main() {
 
     //fs::create_dir_all(Path::new(OUT_PIPE).parent().unwrap());
-    fs::remove_file(OUT_PIPE);
-    fs::remove_file(IN_PIPE);
-
+    let _ = fs::remove_file(OUT_PIPE);
+    let _ = fs::remove_file(IN_PIPE);
 
     crossbeam::scope(|scope| {
         let mut child = Command::new("target/debug/examples/server")
@@ -54,17 +53,15 @@ fn main() {
             }
         });
 
-        let mut in_pipe = nextgen2::ReadPipe::new(IN_PIPE).unwrap();
-        let mut out_pipe = LazyWritePipe::new(OUT_PIPE);
-        //thread::sleep(Duration::from_millis(1000));
-        //let mut out_pipe = nextgen2::WritePipe::new(OUT_PIPE).unwrap();
+        let mut in_pipe = make_read_pipe(IN_PIPE).expect("client read pipe failed");
+        let mut out_pipe = spin_open_write_pipe(OUT_PIPE).expect("client write pipe failed");
 
         let poll = Poll::new().unwrap();
         let mut events = Events::with_capacity(1024);
 
         poll.register(&recv, STDIN, Ready::readable(), PollOpt::edge())
             .expect("stdin register failed");
-        poll.register(&EventedFd(&in_pipe.file.as_raw_fd()), SERVER,
+        poll.register(&EventedFd(&in_pipe.as_raw_fd()), SERVER,
                       Ready::readable(), PollOpt::edge())
             .expect("register failed");
 
@@ -75,17 +72,15 @@ fn main() {
                 match event.token() {
                     STDIN => {
                         let msg = recv.try_recv().expect("no message after ready?");
-                        eprintln!("writing to pipe");
                         out_pipe.write_all(msg.as_bytes()).unwrap();
                         out_pipe.write_all("\n".as_bytes()).unwrap();
                         //eprint!(">>{}", msg);
                     }
                     SERVER => {
-                        //eprintln!("{:?}", event);
-                        //if event.readiness().is_readable() {
-                        let mut buf = String::new();
-                        in_pipe.file.read_to_string(&mut buf);
-                        eprintln!("<<'{}'", buf);
+                        let result = spin_read(&mut in_pipe)
+                            .map(|b| String::from_utf8(b).expect("client: invalid utf8"))
+                            .expect("client read failed");
+                        eprintln!("<<'{}'", result);
                     }
                     other => panic!("whoops"),
                 }
